@@ -38,6 +38,7 @@ from .const import (
     SERVICE_SCAN_FOLDER,
     SERVICE_MARK_FOR_EDIT,
     SERVICE_RESTORE_EDITED_FILES,
+    SERVICE_MARK_FILE_ERROR,
 )
 from .cache_manager import CacheManager
 from .scanner import MediaScanner
@@ -106,6 +107,13 @@ SERVICE_RESTORE_EDITED_FILES_SCHEMA = vol.Schema({
     vol.Optional("folder_filter"): cv.string,  # e.g., "_Edit"
     vol.Optional("file_path"): cv.string,  # Restore specific file
     vol.Optional("entity_id"): cv.entity_ids,  # Target entity (from UI)
+}, extra=vol.ALLOW_EXTRA)
+
+SERVICE_MARK_FILE_ERROR_SCHEMA = vol.Schema({
+    vol.Required("file_path"): cv.string,
+    vol.Optional("error_type", default="load_failed"): cv.string,
+    vol.Optional("auto_move", default=True): cv.boolean,  # Auto-move after threshold
+    vol.Optional("error_threshold", default=2): cv.positive_int,  # Errors before moving
 }, extra=vol.ALLOW_EXTRA)
 
 
@@ -743,7 +751,81 @@ def _register_services(hass: HomeAssistant):
         )
         
         return {"status": "scan_started", "folder": folder_path}
-    
+
+    async def handle_mark_file_error(call):
+        """Handle mark_file_error service call - tracks errors and optionally moves bad files."""
+        import shutil
+
+        entry_id = _get_entry_id_from_call(hass, call)
+        cache_manager = hass.data[DOMAIN][entry_id]["cache_manager"]
+        config = hass.data[DOMAIN][entry_id]["config"]
+
+        file_path = call.data["file_path"]
+        error_type = call.data.get("error_type", "load_failed")
+        auto_move = call.data.get("auto_move", True)
+        error_threshold = call.data.get("error_threshold", 2)
+        base_folder = config.get(CONF_BASE_FOLDER, "/media")
+
+        _LOGGER.info("Recording error for file: %s (type=%s)", file_path, error_type)
+
+        try:
+            # Record the error in database
+            result = await cache_manager.record_file_error(file_path, error_type)
+
+            if "error" in result:
+                return result
+
+            error_count = result["error_count"]
+
+            # Auto-move to _Errors folder if threshold exceeded
+            if auto_move and error_count >= error_threshold:
+                errors_folder = Path(base_folder) / "_Errors"
+                errors_folder.mkdir(exist_ok=True)
+
+                file_name = Path(file_path).name
+                dest_path = errors_folder / file_name
+
+                # Handle duplicate names
+                counter = 1
+                while dest_path.exists():
+                    stem = Path(file_path).stem
+                    suffix = Path(file_path).suffix
+                    dest_path = errors_folder / f"{stem}_{counter}{suffix}"
+                    counter += 1
+
+                # Move the file
+                await hass.async_add_executor_job(shutil.move, file_path, str(dest_path))
+
+                # Record the move
+                await cache_manager.record_file_move(
+                    original_path=file_path,
+                    new_path=str(dest_path),
+                    reason="error"
+                )
+
+                # Remove from database
+                await cache_manager.delete_file(file_path)
+
+                _LOGGER.info(
+                    "Moved error file to %s (error_count=%d >= threshold=%d)",
+                    dest_path, error_count, error_threshold
+                )
+
+                result["moved_to"] = str(dest_path)
+                result["status"] = "moved"
+            else:
+                result["status"] = "recorded"
+
+            return result
+
+        except Exception as e:
+            _LOGGER.error("Error in mark_file_error: %s", e)
+            return {
+                "file_path": file_path,
+                "status": "error",
+                "error": str(e)
+            }
+
     # Register all services
     hass.services.async_register(
         DOMAIN,
@@ -816,7 +898,15 @@ def _register_services(hass: HomeAssistant):
         schema=SERVICE_RESTORE_EDITED_FILES_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
-    
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_MARK_FILE_ERROR,
+        handle_mark_file_error,
+        schema=SERVICE_MARK_FILE_ERROR_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
     _LOGGER.info("Media Index services registered")
 
 

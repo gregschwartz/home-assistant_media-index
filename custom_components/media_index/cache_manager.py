@@ -63,7 +63,10 @@ class CacheManager:
                 last_scanned INTEGER NOT NULL,
                 is_favorited INTEGER DEFAULT 0,
                 rating INTEGER DEFAULT 0,
-                rated_at INTEGER
+                rated_at INTEGER,
+                error_count INTEGER DEFAULT 0,
+                last_error_date INTEGER,
+                last_error_type TEXT
             )
         """)
         
@@ -204,30 +207,45 @@ class CacheManager:
         # Check if new columns exist in exif_data table
         async with self._db.execute("PRAGMA table_info(exif_data)") as cursor:
             columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-        
+            exif_column_names = [col[1] for col in columns]
+
         # Add new EXIF columns if they don't exist
-        new_columns = {
+        exif_new_columns = {
             'altitude': 'REAL',
             'focal_length_35mm': 'INTEGER',
             'exposure_compensation': 'TEXT',
             'metering_mode': 'TEXT',
             'white_balance': 'TEXT'
         }
-        
+
         # Validate against whitelist to prevent SQL injection
-        allowed_col_names = set(new_columns.keys())
         allowed_col_types = {"REAL", "INTEGER", "TEXT"}
-        
-        for col_name, col_type in new_columns.items():
-            if col_name not in column_names:
-                # Additional safety check
-                if col_name not in allowed_col_names or col_type not in allowed_col_types:
-                    _LOGGER.error("Attempted to add invalid column or type: %s %s", col_name, col_type)
+
+        for col_name, col_type in exif_new_columns.items():
+            if col_name not in exif_column_names:
+                if col_type not in allowed_col_types:
+                    _LOGGER.error("Attempted to add invalid column type: %s %s", col_name, col_type)
                     continue
                 _LOGGER.info("Adding column '%s' to exif_data table", col_name)
                 await self._db.execute(f"ALTER TABLE exif_data ADD COLUMN {col_name} {col_type}")
-        
+
+        # Check if new columns exist in media_files table
+        async with self._db.execute("PRAGMA table_info(media_files)") as cursor:
+            columns = await cursor.fetchall()
+            media_column_names = [col[1] for col in columns]
+
+        # Add error tracking columns to media_files if they don't exist
+        media_new_columns = {
+            'error_count': 'INTEGER DEFAULT 0',
+            'last_error_date': 'INTEGER',
+            'last_error_type': 'TEXT'
+        }
+
+        for col_name, col_type in media_new_columns.items():
+            if col_name not in media_column_names:
+                _LOGGER.info("Adding column '%s' to media_files table", col_name)
+                await self._db.execute(f"ALTER TABLE media_files ADD COLUMN {col_name} {col_type}")
+
         await self._db.commit()
         _LOGGER.debug("Database migrations completed")
     
@@ -1213,21 +1231,101 @@ class CacheManager:
     
     async def mark_move_restored(self, move_id: int) -> None:
         """Mark a move as restored.
-        
+
         Args:
             move_id: ID of the move_history record
         """
         import time
-        
+
         await self._db.execute(
-            """UPDATE move_history 
+            """UPDATE move_history
                SET restored = 1, restored_at = ?
                WHERE id = ?""",
             (int(time.time()), move_id)
         )
         await self._db.commit()
         _LOGGER.debug("Marked move %d as restored", move_id)
-    
+
+    async def record_file_error(
+        self,
+        file_path: str,
+        error_type: str = "load_failed"
+    ) -> dict:
+        """Record an error for a file and return updated error info.
+
+        Args:
+            file_path: Path to the file that failed
+            error_type: Type of error (e.g., 'load_failed', 'decode_error')
+
+        Returns:
+            Dict with error_count, last_error_date, last_error_type, file_id
+        """
+        import time
+        current_time = int(time.time())
+
+        # Get current error count
+        async with self._db.execute(
+            "SELECT id, error_count FROM media_files WHERE path = ?",
+            (file_path,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            _LOGGER.warning("File not found in database for error tracking: %s", file_path)
+            return {"error": "file_not_found", "file_path": file_path}
+
+        file_id = row[0]
+        current_error_count = row[1] or 0
+        new_error_count = current_error_count + 1
+
+        # Update error tracking fields
+        await self._db.execute(
+            """UPDATE media_files
+               SET error_count = ?, last_error_date = ?, last_error_type = ?
+               WHERE id = ?""",
+            (new_error_count, current_time, error_type, file_id)
+        )
+        await self._db.commit()
+
+        _LOGGER.info(
+            "Recorded error for %s: count=%d, type=%s",
+            file_path, new_error_count, error_type
+        )
+
+        return {
+            "file_id": file_id,
+            "file_path": file_path,
+            "error_count": new_error_count,
+            "last_error_date": current_time,
+            "last_error_type": error_type
+        }
+
+    async def get_file_error_info(self, file_path: str) -> dict | None:
+        """Get error tracking info for a file.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            Dict with error info or None if file not found
+        """
+        async with self._db.execute(
+            """SELECT id, error_count, last_error_date, last_error_type
+               FROM media_files WHERE path = ?""",
+            (file_path,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "file_id": row[0],
+            "error_count": row[1] or 0,
+            "last_error_date": row[2],
+            "last_error_type": row[3]
+        }
+
     async def close(self) -> None:
         """Close database connection."""
         if self._db:
