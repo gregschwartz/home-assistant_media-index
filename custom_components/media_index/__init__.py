@@ -23,9 +23,13 @@ from .const import (
     CONF_ENABLE_WATCHER,
     CONF_GEOCODE_ENABLED,
     CONF_GEOCODE_NATIVE_LANGUAGE,
+    CONF_FACE_DETECTION_ENABLED,
+    CONF_FACE_DETECTION_MODE,
     DEFAULT_ENABLE_WATCHER,
     DEFAULT_GEOCODE_ENABLED,
     DEFAULT_GEOCODE_NATIVE_LANGUAGE,
+    DEFAULT_FACE_DETECTION_ENABLED,
+    DEFAULT_FACE_DETECTION_MODE,
     DEFAULT_SCAN_SCHEDULE,
     SCAN_SCHEDULE_STARTUP_ONLY,
     SCAN_SCHEDULE_HOURLY,
@@ -39,6 +43,8 @@ from .const import (
     SERVICE_MARK_FOR_EDIT,
     SERVICE_RESTORE_EDITED_FILES,
     SERVICE_MARK_FILE_ERROR,
+    SERVICE_GET_CROP_INFO,
+    SERVICE_DETECT_FACES,
 )
 from .cache_manager import CacheManager
 from .scanner import MediaScanner
@@ -114,6 +120,15 @@ SERVICE_MARK_FILE_ERROR_SCHEMA = vol.Schema({
     vol.Optional("error_type", default="load_failed"): cv.string,
     vol.Optional("auto_move", default=True): cv.boolean,  # Auto-move after threshold
     vol.Optional("error_threshold", default=2): cv.positive_int,  # Errors before moving
+}, extra=vol.ALLOW_EXTRA)
+
+SERVICE_GET_CROP_INFO_SCHEMA = vol.Schema({
+    vol.Required("file_path"): cv.string,
+    vol.Optional("mode"): vol.In(["primary", "all"]),  # Override config default
+}, extra=vol.ALLOW_EXTRA)
+
+SERVICE_DETECT_FACES_SCHEMA = vol.Schema({
+    vol.Required("file_path"): cv.string,
 }, extra=vol.ALLOW_EXTRA)
 
 
@@ -203,13 +218,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if enable_geocoding:
         geocode_service = GeocodeService(hass, use_native_language=use_native_language)
         _LOGGER.info("Geocoding service enabled (native_language=%s)", use_native_language)
-    
-    # Initialize scanner with geocoding support
+
+    # Get face detection config
+    enable_face_detection = config.get(CONF_FACE_DETECTION_ENABLED, DEFAULT_FACE_DETECTION_ENABLED)
+
+    # Initialize scanner with geocoding and face detection support
     scanner = MediaScanner(
-        cache_manager, 
+        cache_manager,
         hass,
         geocode_service=geocode_service,
-        enable_geocoding=enable_geocoding
+        enable_geocoding=enable_geocoding,
+        enable_face_detection=enable_face_detection
     )
     
     # Initialize watcher
@@ -826,6 +845,99 @@ def _register_services(hass: HomeAssistant):
                 "error": str(e)
             }
 
+    async def handle_get_crop_info(call):
+        """Handle get_crop_info service call - returns face-based positioning info."""
+        entry_id = _get_entry_id_from_call(hass, call)
+        cache_manager = hass.data[DOMAIN][entry_id]["cache_manager"]
+        config = hass.data[DOMAIN][entry_id]["config"]
+
+        file_path = call.data["file_path"]
+        # Use mode from call data, or fall back to config default
+        mode = call.data.get(
+            "mode",
+            config.get(CONF_FACE_DETECTION_MODE, DEFAULT_FACE_DETECTION_MODE)
+        )
+
+        try:
+            result = await cache_manager.get_crop_info(file_path, mode)
+            if result is None:
+                return {
+                    "file_path": file_path,
+                    "status": "not_found",
+                    "error": "File not found in database"
+                }
+            result["status"] = "success"
+            result["file_path"] = file_path
+            return result
+        except Exception as e:
+            _LOGGER.error("Error in get_crop_info: %s", e)
+            return {
+                "file_path": file_path,
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def handle_detect_faces(call):
+        """Handle detect_faces service call - runs face detection on a file."""
+        from .face_detector import detect_faces_in_image, faces_to_json, OPENCV_AVAILABLE
+
+        if not OPENCV_AVAILABLE:
+            return {
+                "status": "error",
+                "error": "opencv-python not installed. Install with: pip install opencv-python"
+            }
+
+        entry_id = _get_entry_id_from_call(hass, call)
+        cache_manager = hass.data[DOMAIN][entry_id]["cache_manager"]
+
+        file_path = call.data["file_path"]
+
+        try:
+            # Run face detection in executor to avoid blocking
+            result = await hass.async_add_executor_job(detect_faces_in_image, file_path)
+
+            if result is None:
+                return {
+                    "file_path": file_path,
+                    "status": "error",
+                    "error": "Face detection failed"
+                }
+
+            # Update database with face data
+            await cache_manager.update_face_data(
+                file_path=file_path,
+                face_count=result.face_count,
+                face_center_x=result.primary_face.center_x if result.primary_face else None,
+                face_center_y=result.primary_face.center_y if result.primary_face else None,
+                css_position=result.css_position,
+                faces_json=faces_to_json(result)
+            )
+
+            return {
+                "file_path": file_path,
+                "status": "success",
+                "face_count": result.face_count,
+                "css_position": result.css_position,
+                "primary_face": {
+                    "center_x": result.primary_face.center_x,
+                    "center_y": result.primary_face.center_y,
+                } if result.primary_face else None
+            }
+
+        except FileNotFoundError:
+            return {
+                "file_path": file_path,
+                "status": "error",
+                "error": f"File not found: {file_path}"
+            }
+        except Exception as e:
+            _LOGGER.error("Error in detect_faces: %s", e)
+            return {
+                "file_path": file_path,
+                "status": "error",
+                "error": str(e)
+            }
+
     # Register all services
     hass.services.async_register(
         DOMAIN,
@@ -904,6 +1016,22 @@ def _register_services(hass: HomeAssistant):
         SERVICE_MARK_FILE_ERROR,
         handle_mark_file_error,
         schema=SERVICE_MARK_FILE_ERROR_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_CROP_INFO,
+        handle_get_crop_info,
+        schema=SERVICE_GET_CROP_INFO_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DETECT_FACES,
+        handle_detect_faces,
+        schema=SERVICE_DETECT_FACES_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
 

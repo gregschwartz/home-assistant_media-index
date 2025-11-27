@@ -66,7 +66,12 @@ class CacheManager:
                 rated_at INTEGER,
                 error_count INTEGER DEFAULT 0,
                 last_error_date INTEGER,
-                last_error_type TEXT
+                last_error_type TEXT,
+                face_count INTEGER DEFAULT 0,
+                face_center_x REAL,
+                face_center_y REAL,
+                css_position TEXT,
+                faces_json TEXT
             )
         """)
         
@@ -238,7 +243,12 @@ class CacheManager:
         media_new_columns = {
             'error_count': 'INTEGER DEFAULT 0',
             'last_error_date': 'INTEGER',
-            'last_error_type': 'TEXT'
+            'last_error_type': 'TEXT',
+            'face_count': 'INTEGER DEFAULT 0',
+            'face_center_x': 'REAL',
+            'face_center_y': 'REAL',
+            'css_position': 'TEXT',
+            'faces_json': 'TEXT'
         }
 
         for col_name, col_type in media_new_columns.items():
@@ -1325,6 +1335,82 @@ class CacheManager:
             "last_error_date": row[2],
             "last_error_type": row[3]
         }
+
+    async def update_face_data(
+        self,
+        file_path: str,
+        face_count: int,
+        face_center_x: float | None,
+        face_center_y: float | None,
+        css_position: str | None,
+        faces_json: str | None
+    ) -> bool:
+        """Update face detection data for a file.
+
+        Args:
+            file_path: Path to the file
+            face_count: Number of faces detected
+            face_center_x: X coordinate of primary face center (0.0-1.0)
+            face_center_y: Y coordinate of primary face center (0.0-1.0)
+            css_position: CSS background-position string (e.g., "45% 30%")
+            faces_json: JSON string with all face data
+
+        Returns:
+            True if updated successfully
+        """
+        await self._db.execute(
+            """UPDATE media_files
+               SET face_count = ?, face_center_x = ?, face_center_y = ?,
+                   css_position = ?, faces_json = ?
+               WHERE path = ?""",
+            (face_count, face_center_x, face_center_y, css_position, faces_json, file_path)
+        )
+        await self._db.commit()
+        _LOGGER.debug("Updated face data for %s: count=%d", file_path, face_count)
+        return True
+
+    async def get_crop_info(
+        self,
+        file_path: str,
+        mode: str = "primary"
+    ) -> dict | None:
+        """Get crop/positioning info for a file based on face detection.
+
+        Args:
+            file_path: Path to the file
+            mode: "primary" for primary face only, "all" for all faces
+
+        Returns:
+            Dict with crop info or None if file not found
+        """
+        import json
+
+        async with self._db.execute(
+            """SELECT id, face_count, face_center_x, face_center_y, css_position, faces_json
+               FROM media_files WHERE path = ?""",
+            (file_path,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            return None
+
+        result = {
+            "file_id": row[0],
+            "face_count": row[1] or 0,
+            "css_position": row[4] or "50% 50%",  # Default to center
+        }
+
+        if mode == "primary":
+            result["face_center_x"] = row[2]
+            result["face_center_y"] = row[3]
+        elif mode == "all" and row[5]:
+            try:
+                result["faces"] = json.loads(row[5])
+            except json.JSONDecodeError:
+                result["faces"] = []
+
+        return result
 
     async def close(self) -> None:
         """Close database connection."""

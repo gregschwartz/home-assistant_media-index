@@ -71,6 +71,14 @@ SERVICE_MOVE_FILE: Final = "move_file"
 SERVICE_MARK_FOR_EDIT: Final = "mark_for_edit"
 SERVICE_RESTORE_EDITED_FILES: Final = "restore_edited_files"
 SERVICE_MARK_FILE_ERROR: Final = "mark_file_error"
+SERVICE_GET_CROP_INFO: Final = "get_crop_info"
+SERVICE_DETECT_FACES: Final = "detect_faces"
+
+# Face detection config
+CONF_FACE_DETECTION_ENABLED: Final = "face_detection_enabled"
+CONF_FACE_DETECTION_MODE: Final = "face_detection_mode"
+DEFAULT_FACE_DETECTION_ENABLED: Final = False
+DEFAULT_FACE_DETECTION_MODE: Final = "primary"  # "primary" or "all"
 
 # Attributes
 ATTR_SCAN_STATUS: Final = "scan_status"

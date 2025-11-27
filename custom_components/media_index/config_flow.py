@@ -19,6 +19,8 @@ from .const import (
     CONF_GEOCODE_ENABLED,
     CONF_GEOCODE_PRECISION,
     CONF_GEOCODE_NATIVE_LANGUAGE,
+    CONF_FACE_DETECTION_ENABLED,
+    CONF_FACE_DETECTION_MODE,
     CONF_MAX_STARTUP_TIME,
     CONF_CONCURRENT_SCANS,
     CONF_BATCH_SIZE,
@@ -30,6 +32,8 @@ from .const import (
     DEFAULT_GEOCODE_ENABLED,
     DEFAULT_GEOCODE_PRECISION,
     DEFAULT_GEOCODE_NATIVE_LANGUAGE,
+    DEFAULT_FACE_DETECTION_ENABLED,
+    DEFAULT_FACE_DETECTION_MODE,
     DEFAULT_MAX_STARTUP_TIME,
     DEFAULT_CONCURRENT_SCANS,
     DEFAULT_BATCH_SIZE,
@@ -105,6 +109,12 @@ class MediaIndexConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_GEOCODE_NATIVE_LANGUAGE, default=DEFAULT_GEOCODE_NATIVE_LANGUAGE
                     ): bool,
+                    vol.Optional(
+                        CONF_FACE_DETECTION_ENABLED, default=DEFAULT_FACE_DETECTION_ENABLED
+                    ): bool,
+                    vol.Optional(
+                        CONF_FACE_DETECTION_MODE, default=DEFAULT_FACE_DETECTION_MODE
+                    ): vol.In(["primary", "all"]),
                     vol.Optional(
                         CONF_MAX_STARTUP_TIME, default=DEFAULT_MAX_STARTUP_TIME
                     ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
@@ -186,6 +196,14 @@ class MediaIndexOptionsFlow(config_entries.OptionsFlow):
             CONF_GEOCODE_NATIVE_LANGUAGE,
             self.config_entry.data.get(CONF_GEOCODE_NATIVE_LANGUAGE, DEFAULT_GEOCODE_NATIVE_LANGUAGE),
         )
+        current_face_detection = self.config_entry.options.get(
+            CONF_FACE_DETECTION_ENABLED,
+            self.config_entry.data.get(CONF_FACE_DETECTION_ENABLED, DEFAULT_FACE_DETECTION_ENABLED),
+        )
+        current_face_mode = self.config_entry.options.get(
+            CONF_FACE_DETECTION_MODE,
+            self.config_entry.data.get(CONF_FACE_DETECTION_MODE, DEFAULT_FACE_DETECTION_MODE),
+        )
         current_max_startup = self.config_entry.options.get(
             CONF_MAX_STARTUP_TIME,
             self.config_entry.data.get(CONF_MAX_STARTUP_TIME, DEFAULT_MAX_STARTUP_TIME),
@@ -225,6 +243,12 @@ class MediaIndexOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_GEOCODE_NATIVE_LANGUAGE, default=current_native_language
                     ): bool,
+                    vol.Optional(
+                        CONF_FACE_DETECTION_ENABLED, default=current_face_detection
+                    ): bool,
+                    vol.Optional(
+                        CONF_FACE_DETECTION_MODE, default=current_face_mode
+                    ): vol.In(["primary", "all"]),
                     vol.Optional(
                         CONF_MAX_STARTUP_TIME, default=current_max_startup
                     ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
