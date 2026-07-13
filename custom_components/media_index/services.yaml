@@ -1071,3 +1071,122 @@ mirror_to_cast:
           min: 0
           max: 30
           unit_of_measurement: s
+
+mark_file_error:
+  name: Mark File Error
+  description: Record a load/decode error for a media file. After the error threshold is reached the file is moved to the errors folder and a notification is created.
+  target:
+    entity:
+      integration: media_index
+      domain: sensor
+  fields:
+    file_path:
+      name: File Path
+      description: Full filesystem path to the media file (use either this OR media_source_uri)
+      required: false
+      example: "/media/photo/Photos/2023/corrupted.jpg"
+      selector:
+        text:
+    media_source_uri:
+      name: Media Source URI
+      description: Media-source URI (use either this OR file_path)
+      required: false
+      example: "media-source://media_source/media/photo/Photos/2023/corrupted.jpg"
+      selector:
+        text:
+    error_type:
+      name: Error Type
+      description: Type of error (load_failed, decode_error, etc.)
+      default: "load_failed"
+      selector:
+        select:
+          custom_value: true
+          options:
+            - "load_failed"
+            - "decode_error"
+            - "timeout"
+            - "network_error"
+    auto_move:
+      name: Auto Move
+      description: Move file to the errors folder when the error threshold is reached
+      default: true
+      selector:
+        boolean:
+    error_threshold:
+      name: Error Threshold
+      description: Number of errors before moving the file
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 10
+          mode: box
+    move_to_folder:
+      name: Move To Folder
+      description: Folder (under the base folder) where bad files are moved
+      default: "_Errors"
+      selector:
+        text:
+    notify:
+      name: Notify
+      description: Create a persistent notification when a file is moved
+      default: true
+      selector:
+        boolean:
+
+get_crop_info:
+  name: Get Crop Info
+  description: Get face-based positioning info for smart image cropping
+  target:
+    entity:
+      integration: media_index
+      domain: sensor
+  fields:
+    file_path:
+      name: File Path
+      description: Full filesystem path to the media file (use either this OR media_source_uri)
+      required: false
+      example: "/media/photo/Photos/2023/family.jpg"
+      selector:
+        text:
+    media_source_uri:
+      name: Media Source URI
+      description: Media-source URI (use either this OR file_path)
+      required: false
+      example: "media-source://media_source/media/photo/Photos/2023/family.jpg"
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: Return primary face only or all faces
+      default: "primary"
+      selector:
+        select:
+          options:
+            - label: "Primary Face"
+              value: "primary"
+            - label: "All Faces"
+              value: "all"
+
+detect_faces:
+  name: Detect Faces
+  description: Run face detection on an image file and update the database
+  target:
+    entity:
+      integration: media_index
+      domain: sensor
+  fields:
+    file_path:
+      name: File Path
+      description: Full filesystem path to the image file (use either this OR media_source_uri)
+      required: false
+      example: "/media/photo/Photos/2023/portrait.jpg"
+      selector:
+        text:
+    media_source_uri:
+      name: Media Source URI
+      description: Media-source URI (use either this OR file_path)
+      required: false
+      example: "media-source://media_source/media/photo/Photos/2023/portrait.jpg"
+      selector:
+        text:

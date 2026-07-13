@@ -65,6 +65,8 @@ CONF_BURST_INDEX_AFTER_SCAN: Final = "burst_index_after_scan"
 CONF_AUTO_CLEANUP: Final = "auto_cleanup"
 CONF_CLEANUP_SCHEDULE: Final = "cleanup_schedule"
 CONF_CLEANUP_TIME: Final = "cleanup_time"
+CONF_FACE_DETECTION_ENABLED: Final = "face_detection_enabled"
+CONF_FACE_DETECTION_MODE: Final = "face_detection_mode"
 
 # Defaults
 DEFAULT_BASE_FOLDER: Final = "/media"
@@ -89,6 +91,13 @@ DEFAULT_BURST_INDEX_AFTER_SCAN: Final = False
 DEFAULT_AUTO_CLEANUP: Final = True
 DEFAULT_CLEANUP_SCHEDULE: Final = "weekly"
 DEFAULT_CLEANUP_TIME: Final = "02:00"
+DEFAULT_FACE_DETECTION_ENABLED: Final = False
+DEFAULT_FACE_DETECTION_MODE: Final = "primary"  # "primary" or "all"
+
+# Error tracking / bad image handling
+ERRORS_FOLDER_NAME: Final = "_Errors"
+DEFAULT_ERROR_THRESHOLD: Final = 2
+EVENT_FILE_ERROR: Final = "media_index_file_error"
 
 # Installation timeouts and delays
 INSTALL_TIMEOUT_APK: Final = 30  # Reduced from 60 to fail faster when internet is down
@@ -163,6 +172,9 @@ SERVICE_START_CAST_SLIDESHOW: Final = "start_cast_slideshow"
 SERVICE_STOP_CAST_SLIDESHOW: Final = "stop_cast_slideshow"
 SERVICE_MIRROR_TO_CAST: Final = "mirror_to_cast"
 SERVICE_STOP_CAST: Final = "stop_cast"
+SERVICE_MARK_FILE_ERROR: Final = "mark_file_error"
+SERVICE_GET_CROP_INFO: Final = "get_crop_info"
+SERVICE_DETECT_FACES: Final = "detect_faces"
 EVENT_SYNC_UPDATED: Final = "media_index.sync_updated"
 
 # Attributes

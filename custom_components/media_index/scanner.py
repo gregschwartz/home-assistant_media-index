@@ -13,6 +13,7 @@ from .cache_manager import CacheManager
 from .exif_parser import ExifParser
 from .video_parser import VideoMetadataParser
 from .geocoding import GeocodeService
+from .face_detector import detect_faces_in_image, faces_to_json, OPENCV_AVAILABLE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,20 +74,27 @@ class MediaScanner:
     """Scanner for media files."""
     
     def __init__(
-        self, 
-        cache_manager: CacheManager, 
+        self,
+        cache_manager: CacheManager,
         hass: HomeAssistant = None,
         geocode_service: Optional[GeocodeService] = None,
-        enable_geocoding: bool = False
+        enable_geocoding: bool = False,
+        enable_face_detection: bool = False
     ):
         """Initialize the scanner."""
         self.cache = cache_manager
         self.hass = hass
         self.geocode_service = geocode_service
         self.enable_geocoding = enable_geocoding
+        self.enable_face_detection = enable_face_detection and OPENCV_AVAILABLE
         self._is_scanning = False
         self._scan_error_count = 0  # Track errors to prevent log spam
-        _LOGGER.info("MediaScanner initialized (geocoding: %s)", enable_geocoding)
+        _LOGGER.info(
+            "MediaScanner initialized (geocoding: %s, face_detection: %s)",
+            enable_geocoding, self.enable_face_detection
+        )
+        if enable_face_detection and not OPENCV_AVAILABLE:
+            _LOGGER.warning("Face detection requested but opencv-python is not installed")
     
     @property
     def is_scanning(self) -> bool:
@@ -154,7 +162,7 @@ class MediaScanner:
         try:
             for root, dirs, files in os.walk(scan_path):
                 # Skip special folders (where deleted/edit files are moved)
-                dirs[:] = [d for d in dirs if d not in ('_Junk', '_Edit')]
+                dirs[:] = [d for d in dirs if d not in ('_Junk', '_Edit', '_Errors')]
                 
                 # Check depth limit
                 if max_depth is not None:
@@ -378,7 +386,38 @@ class MediaScanner:
                                         await self.cache.add_geocode_cache(lat, lon, location_data)
                                         # Update EXIF record
                                         await self.cache.update_exif_location(file_id, location_data)
-                        
+
+                        # Face detection for images (only runs for new/changed files)
+                        if (self.enable_face_detection and
+                            metadata['file_type'] == 'image' and
+                            file_id > 0):
+                            try:
+                                if self.hass:
+                                    face_result = await self.hass.async_add_executor_job(
+                                        detect_faces_in_image, metadata['path']
+                                    )
+                                else:
+                                    face_result = detect_faces_in_image(metadata['path'])
+
+                                if face_result:
+                                    await self.cache.update_face_data(
+                                        file_path=metadata['path'],
+                                        face_count=face_result.face_count,
+                                        face_center_x=face_result.primary_face.center_x if face_result.primary_face else None,
+                                        face_center_y=face_result.primary_face.center_y if face_result.primary_face else None,
+                                        css_position=face_result.css_position,
+                                        faces_json=faces_to_json(face_result)
+                                    )
+                                    if face_result.face_count > 0:
+                                        _LOGGER.debug(
+                                            "Detected %d face(s) in %s, css_position: %s",
+                                            face_result.face_count,
+                                            metadata['filename'],
+                                            face_result.css_position
+                                        )
+                            except Exception as face_err:
+                                _LOGGER.debug("Face detection failed for %s: %s", metadata['filename'], face_err)
+
                         # Yield control back to event loop every 10 files to prevent blocking startup
                         if files_added % 10 == 0:
                             await asyncio.sleep(0)

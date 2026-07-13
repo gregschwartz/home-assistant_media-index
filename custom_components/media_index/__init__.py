@@ -37,6 +37,8 @@ from .const import (
     CONF_AUTO_CLEANUP,
     CONF_CLEANUP_SCHEDULE,
     CONF_CLEANUP_TIME,
+    CONF_FACE_DETECTION_ENABLED,
+    CONF_FACE_DETECTION_MODE,
     DEFAULT_ENABLE_WATCHER,
     DEFAULT_GEOCODE_ENABLED,
     DEFAULT_GEOCODE_NATIVE_LANGUAGE,
@@ -50,6 +52,11 @@ from .const import (
     DEFAULT_AUTO_CLEANUP,
     DEFAULT_CLEANUP_SCHEDULE,
     DEFAULT_CLEANUP_TIME,
+    DEFAULT_FACE_DETECTION_ENABLED,
+    DEFAULT_FACE_DETECTION_MODE,
+    DEFAULT_ERROR_THRESHOLD,
+    ERRORS_FOLDER_NAME,
+    EVENT_FILE_ERROR,
     DEFAULT_SCAN_ON_STARTUP,
     DEFAULT_SCAN_SCHEDULE,
     SCAN_SCHEDULE_STARTUP_ONLY,
@@ -81,6 +88,9 @@ from .const import (
     SERVICE_STOP_CAST_SLIDESHOW,
     SERVICE_MIRROR_TO_CAST,
     SERVICE_STOP_CAST,
+    SERVICE_MARK_FILE_ERROR,
+    SERVICE_GET_CROP_INFO,
+    SERVICE_DETECT_FACES,
     EVENT_SYNC_UPDATED,
 )
 from .cache_manager import CacheManager
@@ -224,6 +234,45 @@ SERVICE_DELETE_MEDIA_SCHEMA = vol.Schema(
 )
 
 SERVICE_MARK_FOR_EDIT_SCHEMA = vol.Schema(
+    vol.All(
+        {
+            vol.Optional("file_path"): cv.string,
+            vol.Optional("media_source_uri"): cv.string,
+        },
+        _validate_path_or_uri,
+    ),
+    extra=vol.ALLOW_EXTRA,
+)
+
+SERVICE_MARK_FILE_ERROR_SCHEMA = vol.Schema(
+    vol.All(
+        {
+            vol.Optional("file_path"): cv.string,
+            vol.Optional("media_source_uri"): cv.string,
+            vol.Optional("error_type", default="load_failed"): cv.string,
+            vol.Optional("auto_move", default=True): cv.boolean,  # Move after threshold
+            vol.Optional("error_threshold", default=DEFAULT_ERROR_THRESHOLD): cv.positive_int,
+            vol.Optional("move_to_folder", default=ERRORS_FOLDER_NAME): cv.string,
+            vol.Optional("notify", default=True): cv.boolean,  # Persistent notification on move
+        },
+        _validate_path_or_uri,
+    ),
+    extra=vol.ALLOW_EXTRA,
+)
+
+SERVICE_GET_CROP_INFO_SCHEMA = vol.Schema(
+    vol.All(
+        {
+            vol.Optional("file_path"): cv.string,
+            vol.Optional("media_source_uri"): cv.string,
+            vol.Optional("mode"): vol.In(["primary", "all"]),  # Override config default
+        },
+        _validate_path_or_uri,
+    ),
+    extra=vol.ALLOW_EXTRA,
+)
+
+SERVICE_DETECT_FACES_SCHEMA = vol.Schema(
     vol.All(
         {
             vol.Optional("file_path"): cv.string,
@@ -699,11 +748,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Geocoding service enabled (native_language=%s)", use_native_language)
     
     # Initialize scanner with geocoding support
+    enable_face_detection = config.get(CONF_FACE_DETECTION_ENABLED, DEFAULT_FACE_DETECTION_ENABLED)
+
     scanner = MediaScanner(
-        cache_manager, 
+        cache_manager,
         hass,
         geocode_service=geocode_service,
-        enable_geocoding=enable_geocoding
+        enable_geocoding=enable_geocoding,
+        enable_face_detection=enable_face_detection
     )
     
     # Initialize watcher
@@ -1657,7 +1709,235 @@ def _register_services(hass: HomeAssistant):
                 "status": "error",
                 "error": str(e)
             }
-    
+
+    async def handle_mark_file_error(call):
+        """Handle mark_file_error service call.
+
+        Records a load/decode error for a file. After error_threshold errors
+        (default 2) the file is moved to the errors folder (default _Errors)
+        so slideshows stop hitting it, a media_index_file_error event is
+        fired, and a persistent notification is created.
+        """
+        import shutil
+
+        instance = _get_instance_data(hass, call)
+        cache_manager = instance["cache_manager"]
+        config = instance["config"]
+
+        file_path = call.data.get("file_path")
+        media_source_uri = call.data.get("media_source_uri")
+        base_folder = config.get(CONF_BASE_FOLDER, "/media")
+
+        if not file_path and media_source_uri:
+            media_source_prefix = config.get(CONF_MEDIA_SOURCE_URI, "")
+            try:
+                file_path = _convert_uri_to_path(media_source_uri, base_folder, media_source_prefix)
+            except ValueError as e:
+                _LOGGER.error("Failed to convert URI to path: %s", e)
+                return {"status": "error", "error": str(e)}
+
+        error_type = call.data.get("error_type", "load_failed")
+        auto_move = call.data.get("auto_move", True)
+        error_threshold = call.data.get("error_threshold", DEFAULT_ERROR_THRESHOLD)
+        move_to_folder = call.data.get("move_to_folder", ERRORS_FOLDER_NAME)
+        notify = call.data.get("notify", True)
+
+        _LOGGER.info("Recording error for file: %s (type=%s)", file_path, error_type)
+
+        try:
+            result = await cache_manager.record_file_error(file_path, error_type)
+
+            if "error" in result:
+                result["status"] = "error"
+                return result
+
+            error_count = result["error_count"]
+            moved = False
+
+            if auto_move and error_count >= error_threshold:
+                errors_folder = Path(base_folder) / move_to_folder
+                await hass.async_add_executor_job(
+                    lambda: errors_folder.mkdir(parents=True, exist_ok=True)
+                )
+
+                dest_path = errors_folder / Path(file_path).name
+                # Handle duplicate names
+                counter = 1
+                while await hass.async_add_executor_job(dest_path.exists):
+                    dest_path = errors_folder / f"{Path(file_path).stem}_{counter}{Path(file_path).suffix}"
+                    counter += 1
+
+                await hass.async_add_executor_job(shutil.move, file_path, str(dest_path))
+
+                # Record the move so restore_edited_files (folder_filter: move_to_folder)
+                # can bring the file back after it has been fixed
+                await cache_manager.record_file_move(
+                    original_path=file_path,
+                    new_path=str(dest_path),
+                    reason="error"
+                )
+
+                # Remove from database so it no longer appears in queries
+                await cache_manager.delete_file(file_path)
+
+                _LOGGER.warning(
+                    "Moved bad media file to %s (error_count=%d >= threshold=%d)",
+                    dest_path, error_count, error_threshold
+                )
+
+                result["moved_to"] = str(dest_path)
+                result["status"] = "moved"
+                moved = True
+
+                if notify:
+                    hass.async_create_task(
+                        hass.services.async_call(
+                            "persistent_notification",
+                            "create",
+                            {
+                                "title": "Media Index: bad image moved",
+                                "message": (
+                                    f"`{file_path}` failed to load {error_count} times "
+                                    f"({error_type}) and was moved to `{dest_path}`.\n\n"
+                                    f"Fix or delete it, then run "
+                                    f"`media_index.restore_edited_files` with "
+                                    f"`folder_filter: {move_to_folder}` to restore it."
+                                ),
+                                "notification_id": f"media_index_error_{Path(file_path).name}",
+                            },
+                        )
+                    )
+            else:
+                result["status"] = "recorded"
+
+            # Fire an event so automations can react (e.g., mobile notifications)
+            hass.bus.async_fire(EVENT_FILE_ERROR, {
+                "file_path": file_path,
+                "error_type": error_type,
+                "error_count": error_count,
+                "moved": moved,
+                "moved_to": result.get("moved_to"),
+            })
+
+            return result
+
+        except Exception as e:
+            _LOGGER.error("Error in mark_file_error: %s", e)
+            return {
+                "file_path": file_path,
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def handle_get_crop_info(call):
+        """Handle get_crop_info service call - returns face-based positioning info."""
+        instance = _get_instance_data(hass, call)
+        cache_manager = instance["cache_manager"]
+        config = instance["config"]
+
+        file_path = call.data.get("file_path")
+        media_source_uri = call.data.get("media_source_uri")
+        if not file_path and media_source_uri:
+            base_folder = config.get(CONF_BASE_FOLDER)
+            media_source_prefix = config.get(CONF_MEDIA_SOURCE_URI, "")
+            try:
+                file_path = _convert_uri_to_path(media_source_uri, base_folder, media_source_prefix)
+            except ValueError as e:
+                return {"status": "error", "error": str(e)}
+
+        mode = call.data.get(
+            "mode",
+            config.get(CONF_FACE_DETECTION_MODE, DEFAULT_FACE_DETECTION_MODE)
+        )
+
+        try:
+            result = await cache_manager.get_crop_info(file_path, mode)
+            if result is None:
+                return {
+                    "file_path": file_path,
+                    "status": "not_found",
+                    "error": "File not found in database"
+                }
+            result["status"] = "success"
+            result["file_path"] = file_path
+            return result
+        except Exception as e:
+            _LOGGER.error("Error in get_crop_info: %s", e)
+            return {
+                "file_path": file_path,
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def handle_detect_faces(call):
+        """Handle detect_faces service call - runs face detection on a file."""
+        from .face_detector import detect_faces_in_image, faces_to_json, OPENCV_AVAILABLE
+
+        if not OPENCV_AVAILABLE:
+            return {
+                "status": "error",
+                "error": "opencv-python not installed. Face detection is unavailable."
+            }
+
+        instance = _get_instance_data(hass, call)
+        cache_manager = instance["cache_manager"]
+        config = instance["config"]
+
+        file_path = call.data.get("file_path")
+        media_source_uri = call.data.get("media_source_uri")
+        if not file_path and media_source_uri:
+            base_folder = config.get(CONF_BASE_FOLDER)
+            media_source_prefix = config.get(CONF_MEDIA_SOURCE_URI, "")
+            try:
+                file_path = _convert_uri_to_path(media_source_uri, base_folder, media_source_prefix)
+            except ValueError as e:
+                return {"status": "error", "error": str(e)}
+
+        try:
+            # Run face detection in executor to avoid blocking
+            result = await hass.async_add_executor_job(detect_faces_in_image, file_path)
+
+            if result is None:
+                return {
+                    "file_path": file_path,
+                    "status": "error",
+                    "error": "Face detection failed"
+                }
+
+            await cache_manager.update_face_data(
+                file_path=file_path,
+                face_count=result.face_count,
+                face_center_x=result.primary_face.center_x if result.primary_face else None,
+                face_center_y=result.primary_face.center_y if result.primary_face else None,
+                css_position=result.css_position,
+                faces_json=faces_to_json(result)
+            )
+
+            return {
+                "file_path": file_path,
+                "status": "success",
+                "face_count": result.face_count,
+                "css_position": result.css_position,
+                "primary_face": {
+                    "center_x": result.primary_face.center_x,
+                    "center_y": result.primary_face.center_y,
+                } if result.primary_face else None
+            }
+
+        except FileNotFoundError:
+            return {
+                "file_path": file_path,
+                "status": "error",
+                "error": f"File not found: {file_path}"
+            }
+        except Exception as e:
+            _LOGGER.error("Error in detect_faces: %s", e)
+            return {
+                "file_path": file_path,
+                "status": "error",
+                "error": str(e)
+            }
+
     async def handle_cleanup_database(call):
         """Handle cleanup_database service call."""
         cache_manager = _get_instance_data(hass, call)["cache_manager"]
@@ -3125,7 +3405,32 @@ def _register_services(hass: HomeAssistant):
         schema=SERVICE_MARK_FOR_EDIT_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
-    
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_MARK_FILE_ERROR,
+        handle_mark_file_error,
+        schema=SERVICE_MARK_FILE_ERROR_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_CROP_INFO,
+        handle_get_crop_info,
+        schema=SERVICE_GET_CROP_INFO_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DETECT_FACES,
+        handle_detect_faces,
+        schema=SERVICE_DETECT_FACES_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_RESTORE_EDITED_FILES,

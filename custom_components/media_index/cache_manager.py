@@ -78,7 +78,15 @@ class CacheManager:
                 last_scanned INTEGER NOT NULL,
                 is_favorited INTEGER DEFAULT 0,
                 rating INTEGER DEFAULT 0,
-                rated_at INTEGER
+                rated_at INTEGER,
+                error_count INTEGER DEFAULT 0,
+                last_error_date INTEGER,
+                last_error_type TEXT,
+                face_count INTEGER DEFAULT 0,
+                face_center_x REAL,
+                face_center_y REAL,
+                css_position TEXT,
+                faces_json TEXT
             )
         """)
         
@@ -301,6 +309,29 @@ class CacheManager:
                     continue
                 _LOGGER.info("Adding column '%s' to sync_state table", col_name)
                 await self._db.execute(f"ALTER TABLE sync_state ADD COLUMN {col_name} {col_type}")
+
+        # Add error tracking and face detection columns to media_files
+        async with self._db.execute("PRAGMA table_info(media_files)") as cursor:
+            media_columns = [col[1] for col in await cursor.fetchall()]
+        media_new_columns = {
+            "error_count": "INTEGER DEFAULT 0",
+            "last_error_date": "INTEGER",
+            "last_error_type": "TEXT",
+            "face_count": "INTEGER DEFAULT 0",
+            "face_center_x": "REAL",
+            "face_center_y": "REAL",
+            "css_position": "TEXT",
+            "faces_json": "TEXT",
+        }
+        media_allowed_col_names = set(media_new_columns.keys())
+        media_allowed_col_types = {"INTEGER DEFAULT 0", "INTEGER", "REAL", "TEXT"}
+        for col_name, col_type in media_new_columns.items():
+            if col_name not in media_columns:
+                if col_name not in media_allowed_col_names or col_type not in media_allowed_col_types:
+                    _LOGGER.error("Attempted to add invalid media_files column: %s %s", col_name, col_type)
+                    continue
+                _LOGGER.info("Adding column '%s' to media_files table", col_name)
+                await self._db.execute(f"ALTER TABLE media_files ADD COLUMN {col_name} {col_type}")
 
         await self._db.commit()
         _LOGGER.debug("Database migrations completed")
@@ -2630,7 +2661,160 @@ class CacheManager:
         )
         await self._db.commit()
         _LOGGER.debug("Marked move %d as restored", move_id)
-    
+
+    async def record_file_error(
+        self,
+        file_path: str,
+        error_type: str = "load_failed"
+    ) -> dict:
+        """Record an error for a file and return updated error info.
+
+        Args:
+            file_path: Path to the file that failed
+            error_type: Type of error (e.g., 'load_failed', 'decode_error')
+
+        Returns:
+            Dict with error_count, last_error_date, last_error_type, file_id
+        """
+        import time
+        current_time = int(time.time())
+
+        async with self._db.execute(
+            "SELECT id, error_count FROM media_files WHERE path = ?",
+            (file_path,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            _LOGGER.warning("File not found in database for error tracking: %s", file_path)
+            return {"error": "file_not_found", "file_path": file_path}
+
+        file_id = row[0]
+        new_error_count = (row[1] or 0) + 1
+
+        await self._db.execute(
+            """UPDATE media_files
+               SET error_count = ?, last_error_date = ?, last_error_type = ?
+               WHERE id = ?""",
+            (new_error_count, current_time, error_type, file_id)
+        )
+        await self._db.commit()
+
+        _LOGGER.info(
+            "Recorded error for %s: count=%d, type=%s",
+            file_path, new_error_count, error_type
+        )
+
+        return {
+            "file_id": file_id,
+            "file_path": file_path,
+            "error_count": new_error_count,
+            "last_error_date": current_time,
+            "last_error_type": error_type
+        }
+
+    async def get_file_error_info(self, file_path: str) -> dict | None:
+        """Get error tracking info for a file.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            Dict with error info or None if file not found
+        """
+        async with self._db.execute(
+            """SELECT id, error_count, last_error_date, last_error_type
+               FROM media_files WHERE path = ?""",
+            (file_path,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "file_id": row[0],
+            "error_count": row[1] or 0,
+            "last_error_date": row[2],
+            "last_error_type": row[3]
+        }
+
+    async def update_face_data(
+        self,
+        file_path: str,
+        face_count: int,
+        face_center_x: float | None,
+        face_center_y: float | None,
+        css_position: str | None,
+        faces_json: str | None
+    ) -> bool:
+        """Update face detection data for a file.
+
+        Args:
+            file_path: Path to the file
+            face_count: Number of faces detected
+            face_center_x: X coordinate of primary face center (0.0-1.0)
+            face_center_y: Y coordinate of primary face center (0.0-1.0)
+            css_position: CSS background-position string (e.g., "45% 30%")
+            faces_json: JSON string with all face data
+
+        Returns:
+            True if updated successfully
+        """
+        await self._db.execute(
+            """UPDATE media_files
+               SET face_count = ?, face_center_x = ?, face_center_y = ?,
+                   css_position = ?, faces_json = ?
+               WHERE path = ?""",
+            (face_count, face_center_x, face_center_y, css_position, faces_json, file_path)
+        )
+        await self._db.commit()
+        _LOGGER.debug("Updated face data for %s: count=%d", file_path, face_count)
+        return True
+
+    async def get_crop_info(
+        self,
+        file_path: str,
+        mode: str = "primary"
+    ) -> dict | None:
+        """Get crop/positioning info for a file based on face detection.
+
+        Args:
+            file_path: Path to the file
+            mode: "primary" for primary face only, "all" for all faces
+
+        Returns:
+            Dict with crop info or None if file not found
+        """
+        import json
+
+        async with self._db.execute(
+            """SELECT id, face_count, face_center_x, face_center_y, css_position, faces_json
+               FROM media_files WHERE path = ?""",
+            (file_path,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            return None
+
+        result = {
+            "file_id": row[0],
+            "face_count": row[1] or 0,
+            "css_position": row[4] or "50% 50%",  # Default to center
+        }
+
+        if mode == "primary":
+            result["face_center_x"] = row[2]
+            result["face_center_y"] = row[3]
+        elif mode == "all" and row[5]:
+            try:
+                result["faces"] = json.loads(row[5])
+            except json.JSONDecodeError:
+                result["faces"] = []
+
+        return result
+
     async def cleanup_orphaned_exif(self) -> int:
         """Remove orphaned EXIF data rows that don't have corresponding media_files entries.
         
