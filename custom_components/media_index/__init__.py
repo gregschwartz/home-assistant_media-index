@@ -3411,7 +3411,11 @@ def _register_services(hass: HomeAssistant):
         SERVICE_MARK_FILE_ERROR,
         handle_mark_file_error,
         schema=SERVICE_MARK_FILE_ERROR_SCHEMA,
-        supports_response=SupportsResponse.ONLY,
+        # OPTIONAL, not ONLY: wallpanel fires this fire-and-forget (no
+        # return_response), and ONLY would make HA reject the call before
+        # the handler runs - so the bad file would never get moved. The
+        # handler still returns its result dict for callers that want it.
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     hass.services.async_register(
