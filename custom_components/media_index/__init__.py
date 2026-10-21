@@ -95,6 +95,7 @@ from .const import (
 )
 from .cache_manager import CacheManager
 from .scanner import MediaScanner
+from .scan_policy import scan_blocked
 from .watcher import MediaWatcher
 from .exif_parser import ExifParser
 from .video_parser import VideoMetadataParser
@@ -466,7 +467,7 @@ def _setup_scheduled_scan(
             scan_without_libmediainfo = entry_config.get(
                 CONF_SCAN_WITHOUT_LIBMEDIAINFO, DEFAULT_SCAN_WITHOUT_LIBMEDIAINFO
             )
-            if not scan_without_libmediainfo:
+            if scan_blocked(False, scan_without_libmediainfo):
                 _LOGGER.warning(
                     "⏸️ Scheduled scan SKIPPED [%s]: libmediainfo not available and "
                     "'scan_without_libmediainfo' is disabled. "
@@ -825,7 +826,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             scan_without_libmediainfo = config.get(
                 CONF_SCAN_WITHOUT_LIBMEDIAINFO, DEFAULT_SCAN_WITHOUT_LIBMEDIAINFO
             )
-            if not scan_without_libmediainfo:
+            if scan_blocked(False, scan_without_libmediainfo):
                 _LOGGER.warning(
                     "⏸️ Startup scan SKIPPED: libmediainfo not available and "
                     "'scan_without_libmediainfo' is disabled. "
@@ -2493,7 +2494,7 @@ def _register_services(hass: HomeAssistant):
             scan_without_libmediainfo = entry_config.get(
                 CONF_SCAN_WITHOUT_LIBMEDIAINFO, DEFAULT_SCAN_WITHOUT_LIBMEDIAINFO
             )
-            if not scan_without_libmediainfo:
+            if scan_blocked(False, scan_without_libmediainfo):
                 _LOGGER.warning(
                     "⏸️ Scan BLOCKED: libmediainfo not available and 'scan_without_libmediainfo' is disabled.\n"
                     "Enable 'scan_without_libmediainfo' in options if you only index images, "
